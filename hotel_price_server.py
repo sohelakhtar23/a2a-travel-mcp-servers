@@ -1,37 +1,34 @@
 """
-MCP Server — Real Hotel Search (Booking.com via RapidAPI)
-============================================================
+MCP Server — Real Hotel Search (SerpApi / Google Hotels)
+=========================================================
 One tool: search_hotels(city, arrival_date, departure_date, adults) --
-calls Booking.com's real search (via RapidAPI) in two steps (resolve
-the city to a dest_id, then search hotels) and returns a SMALL, cleaned
-list: name, price, currency, rating, review count, star class.
+calls SerpApi's Google Hotels engine in a SINGLE request and returns a
+SMALL, cleaned list sorted cheapest first: name, price per night,
+total price, rating, review count, star class.
 
-Needs a RAPIDAPI_KEY environment variable set on whatever host runs
-this. Sign up free at rapidapi.com and subscribe to the free tier of
-"Booking COM" (by DataCrawler).
+Needs a SERPAPI_API_KEY environment variable (the same key the flight
+server uses). Free plan: 250 searches per month, shared with flights.
 
-This server runs over Streamable HTTP (not stdio), so it can be
-deployed as a standalone remote service and reached by any MCP client
-over a plain URL. Binds to $PORT (Render, and most PaaS hosts, inject
-this automatically) or 8000 for local testing.
+Runs over Streamable HTTP so it can be deployed as a standalone remote
+service (e.g. on Render). Binds to $PORT or 8000 for local testing.
 """
 
 import os
+from datetime import date
+
 import requests
-from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
+from mcp.server.fastmcp import FastMCP
+
 load_dotenv()
 
 PORT = int(os.environ.get("PORT", 8000))
 
 mcp = FastMCP("hotel-price-server", host="0.0.0.0", port=PORT)
 
-HOST = "booking-com15.p.rapidapi.com"
-DEST_URL = f"https://{HOST}/api/v1/hotels/searchDestination"
-HOTELS_URL = f"https://{HOST}/api/v1/hotels/searchHotels"
+SERPAPI_URL = "https://serpapi.com/search.json"
 
-# How many real hotels to hand back -- capped so the payload (and the
-# LLM's context/rate limit) stays sane; already sorted cheapest-first.
+# Cap the payload so the LLM's context stays small.
 MAX_HOTELS = 8
 
 
@@ -41,71 +38,76 @@ def search_hotels(city: str, arrival_date: str, departure_date: str, adults: int
     Search REAL live hotel prices for a city and date range.
 
     Args:
-        city: the city to search, e.g. "Lahore"
+        city: the city to search, e.g. "Istanbul"
         arrival_date: check-in date in YYYY-MM-DD format
         departure_date: check-out date in YYYY-MM-DD format
         adults: number of adult guests
     """
-    api_key = os.environ.get("RAPIDAPI_KEY", "")
+    api_key = os.environ.get("SERPAPI_API_KEY", "")
     if not api_key:
-        return {"ok": False, "error": "No RAPIDAPI_KEY configured on this server's environment."}
+        return {"ok": False, "error": "No SERPAPI_API_KEY configured on this server's environment."}
 
-    headers = {"x-rapidapi-host": HOST, "x-rapidapi-key": api_key}
+    try:
+        nights = (date.fromisoformat(departure_date) - date.fromisoformat(arrival_date)).days
+    except ValueError:
+        return {"ok": False, "error": "Dates must be in YYYY-MM-DD format."}
+    if nights <= 0:
+        return {"ok": False, "error": "departure_date must be after arrival_date."}
 
-    dest_resp = requests.get(DEST_URL, headers=headers, params={"query": city}, timeout=20)
-    if dest_resp.status_code != 200:
-        return {"ok": False, "error": f"Destination search returned {dest_resp.status_code}: {dest_resp.text[:200]}"}
+    params = {
+        "engine": "google_hotels",
+        "q": f"hotels in {city}",
+        "check_in_date": arrival_date,
+        "check_out_date": departure_date,
+        "adults": adults,
+        "currency": "USD",
+        "hl": "en",
+        "sort_by": "3",  # 3 = lowest price
+        "api_key": api_key,
+    }
 
-    destinations = dest_resp.json().get("data") or []
-    # Prefer an actual city match over a specific hotel/landmark match.
-    dest = next((d for d in destinations if d.get("dest_type") == "city"), None) or (destinations[0] if destinations else None)
-    if dest is None:
-        return {"ok": True, "city": city, "total_found": 0, "hotels": []}
+    # No automatic retry on purpose: the free plan only has 250 searches/month.
+    response = requests.get(SERPAPI_URL, params=params, timeout=30)
+    if response.status_code != 200:
+        return {"ok": False, "error": f"SerpApi returned {response.status_code}: {response.text[:200]}"}
 
-    hotels_resp = requests.get(
-        HOTELS_URL,
-        headers=headers,
-        params={
-            "dest_id": dest["dest_id"],
-            "search_type": dest["search_type"],
-            "arrival_date": arrival_date,
-            "departure_date": departure_date,
-            "adults": adults,
-            "currency_code": "USD",
-        },
-        timeout=20,
-    )
-    if hotels_resp.status_code != 200:
-        return {"ok": False, "error": f"Hotel search returned {hotels_resp.status_code}: {hotels_resp.text[:200]}"}
-
-    raw_hotels = (hotels_resp.json().get("data") or {}).get("hotels") or []
+    data = response.json()
+    if data.get("error"):
+        return {"ok": False, "error": data["error"]}
 
     hotels = []
-    for h in raw_hotels:
-        prop = h.get("property", {})
-        price = prop.get("priceBreakdown", {}).get("grossPrice", {})
+    for prop in data.get("properties") or []:
+        per_night = (prop.get("rate_per_night") or {}).get("extracted_lowest")
+        total = (prop.get("total_rate") or {}).get("extracted_lowest")
+        if per_night is None and total is None:
+            continue  # no price for these dates, so it's not useful here
+        if per_night is None:
+            per_night = round(total / nights, 2)
+        if total is None:
+            total = round(per_night * nights, 2)
+
         hotels.append({
             "name": prop.get("name", "Unknown hotel"),
-            "price": price.get("value"),
-            "currency": price.get("currency", "USD"),
-            "rating": prop.get("reviewScore"),
-            "review_count": prop.get("reviewCount"),
-            "stars": prop.get("propertyClass") or prop.get("accuratePropertyClass"),
+            "price_per_night_usd": per_night,
+            "total_price_usd": total,
+            "rating": prop.get("overall_rating"),
+            "review_count": prop.get("reviews"),
+            "stars": prop.get("extracted_hotel_class"),
         })
-    hotels.sort(key=lambda x: x["price"] if x["price"] is not None else float("inf"))
+
+    hotels.sort(key=lambda h: h["price_per_night_usd"])
 
     return {
         "ok": True,
-        "city": dest.get("city_name") or city,
+        "city": city,
         "check_in": arrival_date,
         "check_out": departure_date,
+        "nights": nights,
+        "adults": adults,
         "total_found": len(hotels),
         "hotels": hotels[:MAX_HOTELS],
     }
 
 
 if __name__ == "__main__":
-    # Streamable HTTP -- this process listens on a real port and serves
-    # MCP over HTTP, so any client (local or remote) can connect via
-    # its URL instead of spawning this as a local subprocess.
     mcp.run(transport="streamable-http")
