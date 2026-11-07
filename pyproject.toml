@@ -1,0 +1,12 @@
+[project]
+name = "a2a-travel-mcp-servers"
+version = "0.1.0"
+description = "Remote MCP servers (flight + hotel) for the A2A Travel Agents project"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.13.1,<2",
+    "python-dotenv>=1.2.4",
+    "requests>=2.31.0",
+    "uvicorn[standard]>=0.35.0",
+]

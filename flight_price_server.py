@@ -1,123 +1,104 @@
 """
-MCP Server — Real Flight Price Search (FlightAPI.io)
-=======================================================
+MCP Server — Real Flight Price Search (SerpApi / Google Flights)
+=================================================================
 One tool: search_flights(dep_iata, arr_iata, date, cabin) -- calls
-FlightAPI.io's one-way trip search and returns REAL live fares for a
-SPECIFIC date, cheapest first: airline, flight numbers, times, stops,
-price, and which real booking site is offering that price (Kiwi.com,
-Expedia, Trip.com, etc).
+SerpApi's Google Flights engine for a ONE-WAY trip on a SPECIFIC date
+and returns real fares, cheapest first: airline, flight numbers,
+times, stops, duration and price.
 
-Needs a FLIGHTAPI_KEY environment variable set on whatever host runs
-this. Free tier: 100 requests / 30 days, no credit card. Sign up at
-https://api.flightapi.io/register
+Needs a SERPAPI_API_KEY environment variable. Free plan: 250 searches
+per month. Sign up at https://serpapi.com/users/sign_up
 
-This server runs over Streamable HTTP (not stdio), so it can be
-deployed as a standalone remote service and reached by any MCP client
-over a plain URL. Binds to $PORT (Render, and most PaaS hosts, inject
-this automatically) or 8000 for local testing.
+Runs over Streamable HTTP so it can be deployed as a standalone remote
+service (e.g. on Render). Binds to $PORT or 8000 for local testing.
 """
 
 import os
-import time
-
 import requests
 from mcp.server.fastmcp import FastMCP
+from dotenv import load_dotenv
+load_dotenv()
 
 PORT = int(os.environ.get("PORT", 8000))
 
 mcp = FastMCP("flight-price-server", host="0.0.0.0", port=PORT)
 
-BASE_URL = "https://api.flightapi.io/onewaytrip"
+SERPAPI_URL = "https://serpapi.com/search.json"
 
-# How many of the real itineraries FlightAPI finds to hand back --
-# capped so the payload (and the LLM's context) stays sane; they're
-# already sorted cheapest-first so nothing important gets cut.
+# Cap the payload (no. of itineraries) so the LLM's context stays small.
 MAX_ITINERARIES = 10
 
 
 @mcp.tool()
 def search_flights(dep_iata: str, arr_iata: str, date: str, cabin: str = "Economy") -> dict:
     """
-    Search REAL live flight prices for a specific route and date.
+    Search REAL live one-way flight prices for a specific route and date.
 
     Args:
-        dep_iata: 3-letter IATA code of the departure airport, e.g. "SKT"
-        arr_iata: 3-letter IATA code of the arrival airport, e.g. "DXB"
-        date: travel date in YYYY-MM-DD format, e.g. "2026-07-21"
+        dep_iata: 3-letter IATA code of the departure airport, e.g. "ESB"
+        arr_iata: 3-letter IATA code of the arrival airport, e.g. "IST"
+        date: travel date in YYYY-MM-DD format, e.g. "2026-12-15"
         cabin: "Economy" or "Business"
     """
-    api_key = os.environ.get("FLIGHTAPI_KEY", "")
+    api_key = os.environ.get("SERPAPI_API_KEY", "")
     if not api_key:
-        return {"ok": False, "error": "No FLIGHTAPI_KEY configured on this server's environment."}
+        return {"ok": False, "error": "No SERPAPI_API_KEY configured on this server's environment."}
 
-    cabin_key = "Business" if cabin.strip().lower() == "business" else "Economy"
-    url = f"{BASE_URL}/{api_key}/{dep_iata}/{arr_iata}/{date}/1/0/0/{cabin_key}/USD"
+    is_business = cabin.strip().lower() == "business"
+    cabin_label = "Business" if is_business else "Economy"
 
-    # FlightAPI occasionally returns a transient "something went wrong,
-    # please try again" -- one retry clears that up most of the time, so
-    # we don't fail the whole booking over a one-off upstream hiccup.
-    response = requests.get(url, timeout=20)
+    params = {
+        "engine": "google_flights",
+        "departure_id": dep_iata.strip().upper(),
+        "arrival_id": arr_iata.strip().upper(),
+        "outbound_date": date,
+        "type": "2",                                  # 2 = one way
+        "travel_class": "3" if is_business else "1",  # 1 = Economy, 3 = Business
+        "currency": "USD",
+        "hl": "en",
+        "api_key": api_key,
+    }
+
+    # No automatic retry on purpose: the free plan only has 250 searches/month.
+    response = requests.get(SERPAPI_URL, params=params, timeout=30)
     if response.status_code != 200:
-        time.sleep(1.5)
-        response = requests.get(url, timeout=20)
-
-    if response.status_code != 200:
-        return {"ok": False, "error": f"FlightAPI returned {response.status_code}: {response.text[:200]}"}
+        return {"ok": False, "error": f"SerpApi returned {response.status_code}: {response.text[:200]}"}
 
     data = response.json()
+    if data.get("error"):
+        return {"ok": False, "error": data["error"]}
 
-    carriers = {c["id"]: c["name"] for c in data.get("carriers", [])}
-    agents = {a["id"]: a["name"] for a in data.get("agents", [])}
-    legs = {leg["id"]: leg for leg in data.get("legs", [])}
-    segments = {seg["id"]: seg for seg in data.get("segments", [])}
+    raw = (data.get("best_flights") or []) + (data.get("other_flights") or [])
 
     itineraries = []
-    for it in data.get("itineraries", []):
-        leg_ids = it.get("leg_ids") or []
-        leg = legs.get(leg_ids[0]) if leg_ids else None
-        if not leg:
+    for item in raw:
+        price = item.get("price")
+        segments = item.get("flights") or []
+        if price is None or not segments:
             continue
 
-        priced_options = [
-            p for p in it.get("pricing_options", [])
-            if p.get("price", {}).get("amount") is not None
-        ]
-        if not priced_options:
-            continue
-        best = min(priced_options, key=lambda p: p["price"]["amount"])
-        agent_id = best["agent_ids"][0] if best.get("agent_ids") else None
-
-        seg_labels = []
-        for sid in leg.get("segment_ids", []):
-            seg = segments.get(sid, {})
-            carrier_name = carriers.get(seg.get("marketing_carrier_id"), "Unknown airline")
-            flight_no = seg.get("marketing_flight_number", "?")
-            seg_labels.append(f"{carrier_name} {flight_no}")
+        labels = [f"{s.get('airline', 'Unknown airline')} {s.get('flight_number', '?')}" for s in segments]
 
         itineraries.append({
-            "airlines": " + ".join(seg_labels) if seg_labels else "Unknown airline",
-            "departure": leg.get("departure"),
-            "arrival": leg.get("arrival"),
-            "stops": leg.get("stop_count"),
-            "duration_minutes": leg.get("duration"),
-            "price_usd": best["price"]["amount"],
-            "booking_site": agents.get(agent_id, agent_id or "Unknown"),
+            "airlines": " + ".join(labels),
+            "departure": segments[0].get("departure_airport", {}).get("time"),
+            "arrival": segments[-1].get("arrival_airport", {}).get("time"),
+            "stops": len(segments) - 1,
+            "duration_minutes": item.get("total_duration"),
+            "price_usd": price,
         })
 
     itineraries.sort(key=lambda x: x["price_usd"])
 
     return {
         "ok": True,
-        "route": f"{dep_iata} -> {arr_iata}",
+        "route": f"{params['departure_id']} -> {params['arrival_id']}",
         "date": date,
-        "cabin": cabin_key,
+        "cabin": cabin_label,
         "total_found": len(itineraries),
         "itineraries": itineraries[:MAX_ITINERARIES],
     }
 
 
 if __name__ == "__main__":
-    # Streamable HTTP -- this process listens on a real port and serves
-    # MCP over HTTP, so any client (local or remote) can connect via
-    # its URL instead of spawning this as a local subprocess.
     mcp.run(transport="streamable-http")

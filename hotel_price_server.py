@@ -17,9 +17,10 @@ this automatically) or 8000 for local testing.
 """
 
 import os
-
 import requests
 from mcp.server.fastmcp import FastMCP
+from dotenv import load_dotenv
+load_dotenv()
 
 PORT = int(os.environ.get("PORT", 8000))
 
