@@ -15,24 +15,22 @@ Two standalone [Model Context Protocol](https://modelcontextprotocol.io/) server
 
 Both servers use the same tool logic you would find in a local (stdio) MCP server. Only the transport differs: each one runs as a persistent web service with its own URL, so any MCP client (local or remote) can connect to it directly.
 
-## Project Setup (uv)
+## Project Setup
 
-This project uses [uv](https://docs.astral.sh/uv/) for dependency management. Dependencies are declared in `pyproject.toml` and pinned in `uv.lock` (commit both).
+This project uses [uv](https://docs.astral.sh/uv/) for dependency management. Dependencies are declared in `pyproject.toml` and pinned in `uv.lock`.
 
 ```bash
-# Install uv once: https://docs.astral.sh/uv/getting-started/installation/
 uv sync
 ```
 
-## API Key (`.env`)
 
-Create a `.env` file in the project root (never commit it; make sure `.env` is in `.gitignore`):
+Create a `.env` file in the project root and include below keys:
 
 ```
 SERPAPI_API_KEY=your_serpapi_key
 ```
 
-Get a key at https://serpapi.com/users/sign_up. The servers load `.env` automatically for local runs. In production, set the same variable in your host's environment settings instead of uploading the file.
+Get a key at https://serpapi.com/users/sign_up.
 
 ## Running Locally
 
@@ -82,8 +80,6 @@ In the Inspector, add a server with transport **Streamable HTTP** and the server
 ## Deploying to Render
 
 Each server is deployed as its own **Web Service**, both pointing at this same repository.
-
-**Before you deploy**, make sure the repo contains `pyproject.toml`, `uv.lock` and the server files, and that `.env` is **not** committed. Because `requires-python` is `>=3.12`, also commit a `.python-version` file, or set a `PYTHON_VERSION` environment variable on the service, so Render uses a compatible Python.
 
 1. Push this repo to GitHub.
 2. On [Render](https://render.com), click **New +** → **Web Service** and connect this repo.

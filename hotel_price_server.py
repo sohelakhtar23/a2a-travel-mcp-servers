@@ -6,11 +6,6 @@ calls SerpApi's Google Hotels engine in a SINGLE request and returns a
 SMALL, cleaned list sorted cheapest first: name, price per night,
 total price, rating, review count, star class.
 
-Needs a SERPAPI_API_KEY environment variable (the same key the flight
-server uses). Free plan: 250 searches per month, shared with flights.
-
-Runs over Streamable HTTP so it can be deployed as a standalone remote
-service (e.g. on Render). Binds to $PORT or 8000 for local testing.
 """
 
 import os

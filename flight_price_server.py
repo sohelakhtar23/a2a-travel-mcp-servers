@@ -6,11 +6,6 @@ SerpApi's Google Flights engine for a ONE-WAY trip on a SPECIFIC date
 and returns real fares, cheapest first: airline, flight numbers,
 times, stops, duration and price.
 
-Needs a SERPAPI_API_KEY environment variable. Free plan: 250 searches
-per month. Sign up at https://serpapi.com/users/sign_up
-
-Runs over Streamable HTTP so it can be deployed as a standalone remote
-service (e.g. on Render). Binds to $PORT or 8000 for local testing.
 """
 
 import os
